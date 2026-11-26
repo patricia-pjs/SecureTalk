@@ -1,7 +1,5 @@
 """
 SecureTalk - FastAPI Signaling Server & Room Manager
-Author: Patricia Putri J. S. (patricia-pjs) - Project Manager & Backend Signaling
-Branch: feat/signaling-main
 """
 
 from pathlib import Path
