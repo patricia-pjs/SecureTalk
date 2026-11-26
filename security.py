@@ -1,13 +1,20 @@
 """
-SecureTalk - Zero-Storage Room Session Manager & Capacity Enforcement
+SecureTalk - Zero-Storage Room Session Manager & Dynamic Hourly PIN (HMAC-SHA256)
 """
 
 import hashlib
+import hmac
+import os
 import secrets
 import time
 from typing import Dict, Optional, Tuple
 
+SERVER_SECRET_KEY: bytes = os.environ.get(
+    "SECURETALK_SECRET", secrets.token_hex(32)
+).encode("utf-8")
+
 ROOMS_STORE: Dict[str, dict] = {}
+PIN_ROTATION_SECONDS = 3600
 
 
 def hash_room_identifier(room_code: str, room_salt: str) -> str:
@@ -16,26 +23,60 @@ def hash_room_identifier(room_code: str, room_salt: str) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-# Placeholder sementara sebelum dilengkapi oleh Jona (feat/dynamic-pin)
+# ==========================================================================
+# BAGIAN JONA: GENERATOR, VALIDATOR & PENGHITUNG MUNDUR PIN DINAMIS PER JAM
+# ==========================================================================
+
+def _compute_hourly_pin(room_code: str, room_salt: str, time_slot: int) -> str:
+    message = f"{room_code}:{room_salt}:{time_slot}".encode("utf-8")
+    digest = hmac.new(SERVER_SECRET_KEY, message, hashlib.sha256).digest()
+
+    offset = digest[-1] & 0x0F
+    binary_code = (
+        ((digest[offset] & 0x7F) << 24)
+        | ((digest[offset + 1] & 0xFF) << 16)
+        | ((digest[offset + 2] & 0xFF) << 8)
+        | (digest[offset + 3] & 0xFF)
+    )
+    return f"{binary_code % 1_000_000:06d}"
+
+
 def get_current_pin_info(room_code: str) -> dict:
     code = room_code.strip().upper()
-    if code not in ROOMS_STORE:
+    room = ROOMS_STORE.get(code)
+    if not room:
         raise ValueError(f"Room '{code}' tidak ditemukan.")
+
+    now = int(time.time())
+    current_slot = now // PIN_ROTATION_SECONDS
+    next_rotation_epoch = (current_slot + 1) * PIN_ROTATION_SECONDS
+    remaining_seconds = max(0, next_rotation_epoch - now)
+
+    current_pin = _compute_hourly_pin(code, room["salt"], current_slot)
     return {
         "room_code": code,
-        "pin": "000000",
-        "remaining_seconds": 3600,
-        "rotation_interval_seconds": 3600,
+        "pin": current_pin,
+        "remaining_seconds": remaining_seconds,
+        "rotation_interval_seconds": PIN_ROTATION_SECONDS,
     }
 
 
 def verify_room_pin(room_code: str, candidate_pin: str) -> bool:
     code = room_code.strip().upper()
-    return code in ROOMS_STORE and bool(candidate_pin)
+    room = ROOMS_STORE.get(code)
+    if not room or not candidate_pin:
+        return False
+
+    clean_pin = candidate_pin.strip()
+    now = int(time.time())
+    current_slot = now // PIN_ROTATION_SECONDS
+    expected_pin = _compute_hourly_pin(code, room["salt"], current_slot)
+
+    return hmac.compare_digest(expected_pin, clean_pin)
 
 
 # ==========================================================================
-# MANAJEMEN SESI ROOM & PEMBATASAN KAPASITAS (P2P 1-ON-1 VS GRUP)
+# BAGIAN JELI: MANAJEMEN SESI ROOM & PEMBATASAN KAPASITAS (P2P VS GRUP)
 # ==========================================================================
 
 def create_room_session(room_code: str, mode: str, creator_name: str) -> dict:
