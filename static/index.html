@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SecureTalk — Decentralized & Encrypted</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- LOBBY VIEW -->
+  <main id="lobby-view" class="lobby-wrapper">
+    <section class="lobby-card">
+      <div class="logo-header">
+        <svg class="wave-icon" viewBox="0 0 36 24" fill="none">
+          <path d="M2 12H7L11 4L16 20L21 7L25 15L29 12H34" stroke="#3C87B1" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <h1>Secure<span>Talk</span></h1>
+      </div>
+      <p class="tagline">Decentralized &amp; Encrypted</p>
+
+      <h2 class="lobby-title">Lobby</h2>
+
+      <form id="lobby-form" class="lobby-form">
+        <div class="field-group">
+          <label for="device-name">Device Name</label>
+          <input type="text" id="device-name" placeholder="@Chalbn (PowerShell Host)" required />
+        </div>
+
+        <div class="field-group">
+          <label>Mode</label>
+          <div class="mode-toggle" role="group">
+            <button type="button" class="mode-btn active" data-mode="p2p" id="btn-mode-p2p">
+              ⇄ P2P 1-on-1
+            </button>
+            <button type="button" class="mode-btn" data-mode="group" id="btn-mode-group">
+              👥 Group Mesh Chat
+            </button>
+          </div>
+          <input type="hidden" id="room-mode" value="p2p" />
+        </div>
+
+        <div class="field-group">
+          <div class="label-row">
+            <label for="room-code">Room Code</label>
+            <button type="button" id="generate-room-btn" class="link-btn">+ Generate New Room</button>
+          </div>
+          <div class="input-with-icon">
+            <input type="text" id="room-code" placeholder="ST-89X-QY2" minlength="3" required />
+            <button type="button" id="copy-room-btn" class="icon-btn" title="Copy Room Code">❐</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label>Hourly Group PIN</label>
+          <div class="pin-boxes" id="pin-boxes">
+            <input type="text" class="pin-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" />
+            <input type="text" class="pin-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" />
+            <input type="text" class="pin-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" />
+            <input type="text" class="pin-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" />
+            <input type="text" class="pin-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" />
+            <input type="text" class="pin-digit" maxlength="1" inputmode="numeric" pattern="[0-9]" />
+          </div>
+          <small class="helper-text">Rotates hourly for group synchronization (kosongkan jika membuat room baru)</small>
+        </div>
+
+        <div id="lobby-alert" class="alert hidden"></div>
+
+        <button type="submit" class="btn-connect" id="connect-btn">Connect to Mesh</button>
+      </form>
+    </section>
+  </main>
+
+  <!-- CHAT WORKSPACE VIEW -->
+  <main id="chat-view" class="chat-shell hidden">
+    <!-- SIDEBAR KIRI: CONNECTED PEERS -->
+    <aside class="peers-sidebar">
+      <div class="sidebar-brand">
+        <svg class="wave-icon sm" viewBox="0 0 36 24" fill="none">
+          <path d="M2 12H7L11 4L16 20L21 7L25 15L29 12H34" stroke="#3C87B1" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Secure<strong>Talk</strong></span>
+      </div>
+
+      <div class="sidebar-section">
+        <p class="sidebar-heading">Connected Peers<br /><span>(Tailscale VPN)</span></p>
+        <ul id="peer-list" class="peer-items"></ul>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="active-pin-card">
+          <span class="mini-label">ACTIVE PIN</span>
+          <strong id="active-room-pin">••••••</strong>
+        </div>
+        <button type="button" id="leave-room-btn" class="btn-leave">Disconnect</button>
+      </div>
+    </aside>
+
+    <!-- AREA UTAMA KANAN -->
+    <section class="chat-main">
+      <!-- TOP HEADER BAR -->
+      <header class="chat-topbar">
+        <div class="room-title">Room: <span id="active-room-code">ST-89X-QY2</span></div>
+        <div class="topbar-actions">
+          <span class="icon-muted" title="Ephemeral Alert">🔔</span>
+          <span class="icon-muted" title="Encryption Settings">⚙</span>
+        </div>
+      </header>
+
+      <!-- SUB-BAR STATUS ENKRIPSI & PIN ROTATION -->
+      <div class="security-strip">
+        <span class="e2ee-badge">🛡 DTLS + AES-256 E2EE ACTIVE</span>
+        <span class="rotation-timer">PIN ROTATION: <strong id="pin-countdown">59:59</strong></span>
+      </div>
+
+      <!-- STREAM PESAN -->
+      <div id="chat-messages" class="chat-stream">
+        <div class="system-notice">WebRTC Mesh DataChannel siap. Pesan terhapus otomatis dalam 30 detik.</div>
+      </div>
+
+      <!-- INPUT BAR -->
+      <form id="chat-form" class="message-bar">
+        <input
+          type="text"
+          id="chat-input"
+          placeholder="Type an encrypted message..."
+          autocomplete="off"
+          required
+        />
+        <button type="submit" class="send-btn" title="Send Encrypted">➤</button>
+      </form>
+
+      <!-- ENCRYPTED PAYLOAD INSPECTOR -->
+      <div class="inspector-drawer">
+        <div class="inspector-header">
+          <span>ENCRYPTED PAYLOAD INSPECTOR</span>
+          <button type="button" id="clear-inspector-btn" class="dots-btn" title="Clear Logs">•••</button>
+        </div>
+        <div id="inspector-logs" class="inspector-output">
+          <div class="inspector-placeholder">[IDLE] Menunggu paket AES-GCM 256-bit melintas di DataChannel...</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/webrtc-e2ee.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
