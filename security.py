@@ -91,7 +91,7 @@ def create_room_session(room_code: str, mode: str, creator_name: str) -> dict:
     if code in ROOMS_STORE:
         raise ValueError(f"Room '{code}' sudah aktif. Gunakan kode lain atau langsung gabung.")
 
-    max_peers = 2 if clean_mode == "p2p" else 5
+    max_peers = 2 if clean_mode == "p2p" else 8
     room_salt = secrets.token_hex(8)
     session_hash = hash_room_identifier(code, room_salt)
 
