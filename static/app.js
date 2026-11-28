@@ -1,306 +1,469 @@
 /**
- * SecureTalk - DOM Event Binding, Dynamic PIN Countdown & 30s Auto-Delete Controller
+ * SecureTalk - DOM Controller, Ephemeral Timer, Reply, Typing & Read Receipts
  */
 
-document.addEventListener("DOMContentLoaded", () => {
-  // Views
-  const lobbyView = document.getElementById("lobby-view");
-  const chatView = document.getElementById("chat-view");
+import { SecureMeshEngine } from "./webrtc-e2ee.js";
 
-  // Lobby Controls
-  const lobbyForm = document.getElementById("lobby-form");
-  const deviceNameInput = document.getElementById("device-name");
-  const roomModeInput = document.getElementById("room-mode");
-  const btnModeP2P = document.getElementById("btn-mode-p2p");
-  const btnModeGroup = document.getElementById("btn-mode-group");
-  const roomCodeInput = document.getElementById("room-code");
-  const generateRoomBtn = document.getElementById("generate-room-btn");
-  const copyRoomBtn = document.getElementById("copy-room-btn");
-  const pinDigits = Array.from(document.querySelectorAll(".pin-digit"));
-  const lobbyAlert = document.getElementById("lobby-alert");
-  const connectBtn = document.getElementById("connect-btn");
+const lobbyView = document.getElementById("lobbyView");
+const chatView = document.getElementById("chatView");
+const joinForm = document.getElementById("joinForm");
+const deviceNameInput = document.getElementById("deviceNameInput");
+const modeP2PBtn = document.getElementById("modeP2PBtn");
+const modeGroupBtn = document.getElementById("modeGroupBtn");
+const roomCodeInput = document.getElementById("roomCodeInput");
+const generateRoomBtn = document.getElementById("generateRoomBtn");
+const copyRoomBtn = document.getElementById("copyRoomBtn");
+const ttlSelect = document.getElementById("ttlSelect");
+const pinDigits = Array.from(document.querySelectorAll(".pin-digit"));
+const lobbyError = document.getElementById("lobbyError");
 
-  // Chat Workspace Controls
-  const activeRoomCodeEl = document.getElementById("active-room-code");
-  const activeRoomPinEl = document.getElementById("active-room-pin");
-  const pinCountdownEl = document.getElementById("pin-countdown");
-  const peerListEl = document.getElementById("peer-list");
-  const chatMessagesEl = document.getElementById("chat-messages");
-  const chatForm = document.getElementById("chat-form");
-  const chatInput = document.getElementById("chat-input");
-  const inspectorLogsEl = document.getElementById("inspector-logs");
-  const clearInspectorBtn = document.getElementById("clear-inspector-btn");
-  const leaveRoomBtn = document.getElementById("leave-room-btn");
+const roomModeBadge = document.getElementById("roomModeBadge");
+const sidebarRoomCode = document.getElementById("sidebarRoomCode");
+const sidebarPin = document.getElementById("sidebarPin");
+const pinCountdown = document.getElementById("pinCountdown");
+const sidebarTtlLabel = document.getElementById("sidebarTtlLabel");
+const peerCount = document.getElementById("peerCount");
+const peerList = document.getElementById("peerList");
+const payloadInspector = document.getElementById("payloadInspector");
+const leaveRoomBtn = document.getElementById("leaveRoomBtn");
 
-  let engine = null;
-  let pinTimerInterval = null;
-  let remainingPinSeconds = 3600;
+const typingIndicator = document.getElementById("typingIndicator");
+const messagesContainer = document.getElementById("messagesContainer");
+const replyPreviewBar = document.getElementById("replyPreviewBar");
+const replyPreviewSender = document.getElementById("replyPreviewSender");
+const replyPreviewText = document.getElementById("replyPreviewText");
+const cancelReplyBtn = document.getElementById("cancelReplyBtn");
+const messageForm = document.getElementById("messageForm");
+const messageInput = document.getElementById("messageInput");
 
-  // 1. Toggle Mode P2P vs Group Mesh
-  [btnModeP2P, btnModeGroup].forEach((btn) => {
-    btn.addEventListener("click", () => {
-      btnModeP2P.classList.remove("active");
-      btnModeGroup.classList.remove("active");
-      btn.classList.add("active");
-      roomModeInput.value = btn.dataset.mode;
-    });
+let selectedMode = "p2p";
+let meshEngine = null;
+let pinTimerInterval = null;
+let activeReplyTarget = null;
+let typingDebounceTimer = null;
+let isCurrentlyTyping = false;
+
+const activeTypingPeers = new Map(); // senderId -> { name, timeoutId }
+const messageBubbles = new Map(); // messageId -> { element, readBy: Set<string> }
+
+const clientId =
+  "peer-" + Math.random().toString(36).substring(2, 10).toUpperCase();
+
+function generateRandomRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const part = () =>
+    Array.from({ length: 3 }, () =>
+      chars.charAt(Math.floor(Math.random() * chars.length))
+    ).join("");
+  return `ST-${part()}-${part()}`;
+}
+
+function getPinFromBoxes() {
+  return pinDigits.map((input) => input.value.trim()).join("");
+}
+
+function setPinToBoxes(pin) {
+  pin.split("").forEach((digit, idx) => {
+    if (pinDigits[idx]) pinDigits[idx].value = digit;
+  });
+}
+
+function showLobbyError(msg) {
+  lobbyError.textContent = msg;
+  lobbyError.classList.remove("hidden");
+}
+
+function clearLobbyError() {
+  lobbyError.textContent = "";
+  lobbyError.classList.add("hidden");
+}
+
+function formatTtlLabel(seconds) {
+  if (seconds === 30) return "30 Detik (Demo)";
+  if (seconds === 300) return "5 Menit";
+  if (seconds === 3600) return "1 Jam";
+  return "Sampai Keluar Room";
+}
+
+function startPinCountdown(initialSeconds) {
+  if (pinTimerInterval) clearInterval(pinTimerInterval);
+  let remaining = initialSeconds;
+
+  const updateText = () => {
+    const mins = String(Math.floor(remaining / 60)).padStart(2, "0");
+    const secs = String(remaining % 60).padStart(2, "0");
+    pinCountdown.textContent = `${mins}:${secs}`;
+    if (remaining > 0) remaining -= 1;
+  };
+
+  updateText();
+  pinTimerInterval = setInterval(updateText, 1000);
+}
+
+// Mode Toggle
+[modeP2PBtn, modeGroupBtn].forEach((btn) => {
+  btn.addEventListener("click", () => {
+    modeP2PBtn.classList.remove("active");
+    modeGroupBtn.classList.remove("active");
+    btn.classList.add("active");
+    selectedMode = btn.dataset.mode;
+  });
+});
+
+// Room Code Generator & Copy
+roomCodeInput.value = generateRandomRoomCode();
+generateRoomBtn.addEventListener("click", () => {
+  roomCodeInput.value = generateRandomRoomCode();
+});
+
+copyRoomBtn.addEventListener("click", async () => {
+  await navigator.clipboard.writeText(roomCodeInput.value.trim());
+  copyRoomBtn.textContent = "✓";
+  setTimeout(() => (copyRoomBtn.textContent = "❐"), 1200);
+});
+
+// 6-Digit PIN Box Navigation & Paste
+pinDigits.forEach((box, index) => {
+  box.addEventListener("input", () => {
+    box.value = box.value.replace(/\D/g, "").slice(0, 1);
+    if (box.value && index < pinDigits.length - 1) {
+      pinDigits[index + 1].focus();
+    }
   });
 
-  // 2. Generate Kode Room Acak
-  generateRoomBtn.addEventListener("click", () => {
-    const part1 = Math.random().toString(36).substring(2, 5).toUpperCase();
-    const part2 = Math.random().toString(36).substring(2, 5).toUpperCase();
-    roomCodeInput.value = `ST-${part1}-${part2}`;
-    pinDigits.forEach((input) => (input.value = ""));
-    hideAlert();
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Backspace" && !box.value && index > 0) {
+      pinDigits[index - 1].focus();
+    }
   });
 
-  // 3. Copy Kode Room
-  copyRoomBtn.addEventListener("click", async () => {
-    if (!roomCodeInput.value.trim()) return;
-    await navigator.clipboard.writeText(roomCodeInput.value.trim().toUpperCase());
-    copyRoomBtn.textContent = "✓";
-    setTimeout(() => (copyRoomBtn.textContent = "❐"), 1200);
-  });
-
-  // 4. Navigasi Otomatis 6 Kotak PIN
-  pinDigits.forEach((input, idx) => {
-    input.addEventListener("input", (e) => {
-      e.target.value = e.target.value.replace(/\D/g, "").slice(0, 1);
-      if (e.target.value && idx < pinDigits.length - 1) {
-        pinDigits[idx + 1].focus();
-      }
-    });
-
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Backspace" && !e.target.value && idx > 0) {
-        pinDigits[idx - 1].focus();
-      }
-    });
-
-    input.addEventListener("paste", (e) => {
-      e.preventDefault();
-      const pasted = (e.clipboardData.getData("text") || "")
-        .replace(/\D/g, "")
-        .slice(0, 6);
-      pasted.split("").forEach((char, i) => {
-        if (pinDigits[i]) pinDigits[i].value = char;
-      });
-    });
-  });
-
-  // 5. Submit Lobby (Buat Room Baru jika PIN kosong, atau Gabung jika PIN terisi)
-  lobbyForm.addEventListener("submit", async (e) => {
+  box.addEventListener("paste", (e) => {
     e.preventDefault();
-    hideAlert();
-
-    const deviceName = deviceNameInput.value.trim();
-    const roomCode = roomCodeInput.value.trim().toUpperCase();
-    const mode = roomModeInput.value;
-    const enteredPin = pinDigits.map((d) => d.value).join("");
-
-    if (!deviceName || !roomCode) {
-      showAlert("Device Name dan Room Code wajib diisi.");
-      return;
-    }
-
-    connectBtn.disabled = true;
-    connectBtn.textContent = "Connecting to Mesh...";
-
-    try {
-      let activePin = enteredPin;
-
-      if (!enteredPin) {
-        // Buat sesi room baru di backend FastAPI
-        const res = await fetch("/api/rooms/create", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            room_code: roomCode,
-            mode,
-            creator_name: deviceName,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "Gagal membuat room.");
-
-        activePin = data.pin;
-        remainingPinSeconds = data.remaining_seconds || 3600;
-      } else {
-        // Verifikasi PIN untuk bergabung ke room yang sudah aktif
-        if (enteredPin.length !== 6) {
-          throw new Error("PIN Dinamis harus terdiri dari 6 digit angka.");
-        }
-        const res = await fetch("/api/rooms/verify", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            room_code: roomCode,
-            pin: enteredPin,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || "PIN Dinamis salah atau room tidak ditemukan.");
-
-        remainingPinSeconds = data.remaining_seconds || 3600;
-      }
-
-      // Masuk ke Workspace Chat & Jalankan WebRTC Mesh Engine
-      enterChatWorkspace(roomCode, activePin, deviceName);
-    } catch (err) {
-      showAlert(err.message);
-    } finally {
-      connectBtn.disabled = false;
-      connectBtn.textContent = "Connect to Mesh";
+    const pasted = (e.clipboardData.getData("text") || "")
+      .replace(/\D/g, "")
+      .slice(0, 6);
+    if (pasted) {
+      setPinToBoxes(pasted);
+      const focusIdx = Math.min(pasted.length, pinDigits.length - 1);
+      pinDigits[focusIdx].focus();
     }
   });
+});
 
-  function enterChatWorkspace(roomCode, activePin, deviceName) {
+// Reply Preview Handlers
+function setReplyTarget({ messageId, senderName, text }) {
+  activeReplyTarget = { messageId, senderName, text };
+  replyPreviewSender.textContent = `Membalas ${senderName}`;
+  replyPreviewText.textContent = text;
+  replyPreviewBar.classList.remove("hidden");
+  messageInput.focus();
+}
+
+function clearReplyTarget() {
+  activeReplyTarget = null;
+  replyPreviewBar.classList.add("hidden");
+  replyPreviewSender.textContent = "";
+  replyPreviewText.textContent = "";
+}
+
+cancelReplyBtn.addEventListener("click", clearReplyTarget);
+
+// Typing Indicator Render
+function refreshTypingIndicator() {
+  if (activeTypingPeers.size === 0) {
+    typingIndicator.classList.add("hidden");
+    return;
+  }
+  const names = Array.from(activeTypingPeers.values()).map((p) => p.name);
+  typingIndicator.textContent =
+    names.length === 1
+      ? `${names[0]} sedang mengetik...`
+      : `${names.join(", ")} sedang mengetik...`;
+  typingIndicator.classList.remove("hidden");
+}
+
+function handleIncomingTyping({ senderId, senderName, isTyping }) {
+  const existing = activeTypingPeers.get(senderId);
+  if (existing) clearTimeout(existing.timeoutId);
+
+  if (!isTyping) {
+    activeTypingPeers.delete(senderId);
+    refreshTypingIndicator();
+    return;
+  }
+
+  const timeoutId = setTimeout(() => {
+    activeTypingPeers.delete(senderId);
+    refreshTypingIndicator();
+  }, 3000);
+
+  activeTypingPeers.set(senderId, { name: senderName, timeoutId });
+  refreshTypingIndicator();
+}
+
+// Render System & Chat Messages
+function appendSystemMessage(text) {
+  const div = document.createElement("div");
+  div.className = "system-msg";
+  div.textContent = text;
+  messagesContainer.appendChild(div);
+  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+}
+
+function renderChatBubble(msg, isOwn) {
+  const bubble = document.createElement("div");
+  bubble.className = `msg-bubble ${isOwn ? "own" : "peer"}`;
+  bubble.dataset.messageId = msg.messageId;
+
+  const topRow = document.createElement("div");
+  topRow.className = "msg-top";
+
+  const senderSpan = document.createElement("span");
+  senderSpan.className = "msg-sender";
+  senderSpan.textContent = isOwn ? `${msg.senderName} (Anda)` : msg.senderName;
+
+  const replyBtn = document.createElement("button");
+  replyBtn.type = "button";
+  replyBtn.className = "reply-trigger-btn";
+  replyBtn.textContent = "↩ Balas";
+  replyBtn.addEventListener("click", () =>
+    setReplyTarget({
+      messageId: msg.messageId,
+      senderName: msg.senderName,
+      text: msg.text,
+    })
+  );
+
+  topRow.appendChild(senderSpan);
+  topRow.appendChild(replyBtn);
+  bubble.appendChild(topRow);
+
+  if (msg.replyTo) {
+    const quoteBox = document.createElement("div");
+    quoteBox.className = "quoted-reply";
+    const quoteSender = document.createElement("strong");
+    quoteSender.textContent = msg.replyTo.senderName;
+    const quoteText = document.createElement("span");
+    quoteText.textContent = msg.replyTo.text;
+    quoteBox.appendChild(quoteSender);
+    quoteBox.appendChild(quoteText);
+    bubble.appendChild(quoteBox);
+  }
+
+  const bodyP = document.createElement("p");
+  bodyP.className = "msg-text";
+  bodyP.textContent = msg.text;
+  bubble.appendChild(bodyP);
+
+  const metaDiv = document.createElement("div");
+  metaDiv.className = "msg-meta";
+
+  const ttlSpan = document.createElement("span");
+  const ttlSec = Number(msg.ttlSeconds || 0);
+  ttlSpan.textContent = ttlSec > 0 ? `⏳ ${ttlSec}d` : "♾️ Sesi";
+  metaDiv.appendChild(ttlSpan);
+
+  if (isOwn) {
+    const tickSpan = document.createElement("span");
+    tickSpan.className = "read-ticks";
+    tickSpan.textContent = "✓";
+    tickSpan.title = "Terkirim via P2P";
+    metaDiv.appendChild(tickSpan);
+    messageBubbles.set(msg.messageId, {
+      element: bubble,
+      tickSpan,
+      readBy: new Set(),
+    });
+  }
+
+  bubble.appendChild(metaDiv);
+  messagesContainer.appendChild(bubble);
+  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+  // Ephemeral Auto-Delete Timer
+  if (ttlSec > 0) {
+    let left = ttlSec;
+    const countdownTimer = setInterval(() => {
+      left -= 1;
+      if (left > 0) {
+        ttlSpan.textContent = `⏳ ${left}d`;
+      } else {
+        clearInterval(countdownTimer);
+        bubble.remove();
+        messageBubbles.delete(msg.messageId);
+      }
+    }, 1000);
+  }
+}
+
+function handleIncomingReadReceipt({ messageId, readerId }) {
+  const entry = messageBubbles.get(messageId);
+  if (!entry) return;
+  entry.readBy.add(readerId);
+  entry.tickSpan.textContent = "✓✓";
+  entry.tickSpan.classList.add("read");
+  entry.tickSpan.title = `Dibaca oleh ${entry.readBy.size} peer`;
+}
+
+// Form Submit: Create or Join Room
+joinForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  clearLobbyError();
+
+  const deviceName = deviceNameInput.value.trim();
+  const roomCode = roomCodeInput.value.trim().toUpperCase();
+  const enteredPin = getPinFromBoxes();
+  const selectedTtl = Number(ttlSelect.value);
+
+  if (!deviceName || !roomCode) {
+    showLobbyError("Nama perangkat dan kode room wajib diisi.");
+    return;
+  }
+
+  try {
+    let activePin = enteredPin;
+    let remainingSeconds = 3600;
+    let finalMode = selectedMode;
+
+    if (!enteredPin) {
+      // Buat room baru
+      const res = await fetch("/api/rooms/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          room_code: roomCode,
+          mode: selectedMode,
+          creator_name: deviceName,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showLobbyError(data.detail || "Gagal membuat room baru.");
+        return;
+      }
+      activePin = data.pin;
+      remainingSeconds = data.remaining_seconds;
+      finalMode = data.mode;
+    } else {
+      // Gabung ke room yang sudah ada
+      if (enteredPin.length !== 6) {
+        showLobbyError("PIN Dinamis harus 6 digit angka.");
+        return;
+      }
+      const res = await fetch("/api/rooms/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ room_code: roomCode, pin: enteredPin }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showLobbyError(data.detail || "PIN Dinamis salah atau room tidak ditemukan.");
+        return;
+      }
+      remainingSeconds = data.remaining_seconds;
+      finalMode = data.mode;
+    }
+
+    // Switch ke Chat View
     lobbyView.classList.add("hidden");
     chatView.classList.remove("hidden");
 
-    activeRoomCodeEl.textContent = roomCode;
-    activeRoomPinEl.textContent = activePin;
-    startPinCountdown(remainingPinSeconds);
+    sidebarRoomCode.textContent = roomCode;
+    sidebarPin.textContent = activePin;
+    roomModeBadge.textContent =
+      finalMode === "p2p" ? "P2P 1-on-1" : "Group Mesh (Max 8)";
+    sidebarTtlLabel.textContent = formatTtlLabel(selectedTtl);
+    startPinCountdown(remainingSeconds);
 
-    engine = new window.SecureTalkEngine({
+    meshEngine = new SecureMeshEngine({
       roomCode,
       pin: activePin,
+      clientId,
       deviceName,
-      onMessageReceived: (msg) => renderChatBubble(msg, false),
-      onPeerListUpdated: (peers) => renderPeerList(peers),
-      onInspectorLog: (log) => appendInspectorLog(log),
-      onSystemNotice: (notice) => appendSystemNotice(notice),
-      onConnectionClosed: (reason) => {
-        appendSystemNotice(`Terputus: ${reason}`);
+      onPeerListChange: (peers) => {
+        peerCount.textContent = peers.length;
+        peerList.innerHTML = "";
+        peers.forEach((p) => {
+          const li = document.createElement("li");
+          li.textContent = `${p.deviceName} • ${p.state}`;
+          peerList.appendChild(li);
+        });
       },
+      onChatMessage: async (msg) => {
+        renderChatBubble(msg, false);
+        await meshEngine.sendReadReceipt(msg.messageId);
+      },
+      onTypingSignal: (sig) => handleIncomingTyping(sig),
+      onReadReceipt: (ack) => handleIncomingReadReceipt(ack),
+      onEncryptedPacketLog: (direction, envelope) => {
+        payloadInspector.textContent = `[${direction}] AES-GCM-256\nIV: ${envelope.iv}\nCiphertext: ${envelope.ciphertext}`;
+      },
+      onSystemNotice: (notice) => appendSystemMessage(notice),
     });
 
-    engine.connect();
+    await meshEngine.connect();
+    appendSystemMessage(
+      `Terhubung ke room ${roomCode} (Auto-Delete: ${formatTtlLabel(selectedTtl)}).`
+    );
+  } catch (err) {
+    showLobbyError("Terjadi kesalahan jaringan saat menghubungkan ke server.");
+  }
+});
+
+// Typing Event Emitter
+messageInput.addEventListener("input", () => {
+  if (!meshEngine) return;
+
+  if (!isCurrentlyTyping && messageInput.value.trim().length > 0) {
+    isCurrentlyTyping = true;
+    meshEngine.sendTypingStatus(true);
   }
 
-  // 6. Kirim Pesan Terenkripsi
-  chatForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (!engine) return;
-
-    const text = chatInput.value.trim();
-    if (!text) return;
-
-    chatInput.value = "";
-    const sentMsg = await engine.sendEncryptedMessage(text);
-    if (sentMsg) {
-      renderChatBubble(sentMsg, true);
+  clearTimeout(typingDebounceTimer);
+  typingDebounceTimer = setTimeout(() => {
+    if (isCurrentlyTyping) {
+      isCurrentlyTyping = false;
+      meshEngine.sendTypingStatus(false);
     }
+  }, 1500);
+});
+
+// Send Chat Message
+messageForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = messageInput.value.trim();
+  if (!text || !meshEngine) return;
+
+  const messageId =
+    "msg-" + Date.now() + "-" + Math.random().toString(36).substring(2, 6);
+  const ttlSeconds = Number(ttlSelect.value);
+
+  const sentPayload = await meshEngine.sendChatMessage({
+    messageId,
+    text,
+    ttlSeconds,
+    replyTo: activeReplyTarget,
   });
 
-  // 7. Render Gelembung Pesan + Auto-Delete 30 Detik
-  function renderChatBubble({ senderName, text, timestamp, ttlSeconds = 30 }, isOutgoing) {
-    const row = document.createElement("div");
-    row.className = `msg-row ${isOutgoing ? "outgoing" : "incoming"}`;
+  renderChatBubble(sentPayload, true);
 
-    const tag = document.createElement("span");
-    tag.className = "auto-delete-tag";
-    tag.textContent = isOutgoing
-      ? "30s Auto-Delete"
-      : `${senderName} • 30s Auto-Delete`;
-
-    const bubble = document.createElement("div");
-    bubble.className = "bubble";
-
-    const msgText = document.createElement("span");
-    msgText.textContent = text;
-
-    const timeSpan = document.createElement("span");
-    timeSpan.className = "msg-time";
-    timeSpan.textContent = timestamp;
-
-    bubble.appendChild(msgText);
-    bubble.appendChild(timeSpan);
-    row.appendChild(tag);
-    row.appendChild(bubble);
-    chatMessagesEl.appendChild(row);
-    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-
-    // Hapus otomatis dari DOM setelah 30 detik (Zero-Storage Ephemeral)
-    setTimeout(() => {
-      row.style.opacity = "0";
-      row.style.transition = "opacity 0.35s ease";
-      setTimeout(() => row.remove(), 350);
-    }, ttlSeconds * 1000);
+  messageInput.value = "";
+  clearReplyTarget();
+  if (isCurrentlyTyping) {
+    isCurrentlyTyping = false;
+    clearTimeout(typingDebounceTimer);
+    meshEngine.sendTypingStatus(false);
   }
+});
 
-  function renderPeerList(peers) {
-    peerListEl.innerHTML = "";
-    peers.forEach((p) => {
-      const li = document.createElement("li");
-      li.textContent = p.deviceName;
-      peerListEl.appendChild(li);
-    });
-  }
-
-  function appendInspectorLog({ direction, packetId, iv, ciphertext }) {
-    const placeholder = inspectorLogsEl.querySelector(".inspector-placeholder");
-    if (placeholder) placeholder.remove();
-
-    const entry = document.createElement("div");
-    entry.style.marginBottom = "0.45rem";
-    entry.innerHTML = `
-      <div>[P2P] ${direction} packet_id: ${packetId}</div>
-      <div>IV: ${iv.slice(0, 12)}...${iv.slice(-12)}</div>
-      <div>Ciphertext: ${ciphertext.slice(0, 28)}...</div>
-    `;
-    inspectorLogsEl.appendChild(entry);
-    inspectorLogsEl.scrollTop = inspectorLogsEl.scrollHeight;
-  }
-
-  function appendSystemNotice(text) {
-    const div = document.createElement("div");
-    div.className = "system-notice";
-    div.textContent = text;
-    chatMessagesEl.appendChild(div);
-    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-  }
-
-  function startPinCountdown(seconds) {
-    if (pinTimerInterval) clearInterval(pinTimerInterval);
-    let left = seconds;
-
-    const updateText = () => {
-      const mins = String(Math.floor(left / 60)).padStart(2, "0");
-      const secs = String(left % 60).padStart(2, "0");
-      pinCountdownEl.textContent = `${mins}:${secs}`;
-      if (left > 0) left--;
-    };
-
-    updateText();
-    pinTimerInterval = setInterval(updateText, 1000);
-  }
-
-  clearInspectorBtn.addEventListener("click", () => {
-    inspectorLogsEl.innerHTML =
-      '<div class="inspector-placeholder">[CLEARED] Log payload dibersihkan dari memori tampilan.</div>';
-  });
-
-  leaveRoomBtn.addEventListener("click", () => {
-    if (engine) {
-      engine.cleanup();
-      engine = null;
-    }
-    if (pinTimerInterval) clearInterval(pinTimerInterval);
-    chatMessagesEl.innerHTML = "";
-    inspectorLogsEl.innerHTML =
-      '<div class="inspector-placeholder">[IDLE] Menunggu paket AES-GCM 256-bit melintas di DataChannel...</div>';
-    chatView.classList.add("hidden");
-    lobbyView.classList.remove("hidden");
-  });
-
-  function showAlert(msg) {
-    lobbyAlert.textContent = msg;
-    lobbyAlert.classList.remove("hidden");
-  }
-
-  function hideAlert() {
-    lobbyAlert.classList.add("hidden");
-  }
+// Leave & Purge Session
+leaveRoomBtn.addEventListener("click", () => {
+  meshEngine?.disconnectAll();
+  if (pinTimerInterval) clearInterval(pinTimerInterval);
+  messagesContainer.innerHTML = "";
+  messageBubbles.clear();
+  activeTypingPeers.clear();
+  clearReplyTarget();
+  chatView.classList.add("hidden");
+  lobbyView.classList.remove("hidden");
 });
